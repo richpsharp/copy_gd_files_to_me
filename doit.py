@@ -1,4 +1,5 @@
 from __future__ import print_function
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import argparse
 import os
 import pickle
@@ -7,6 +8,7 @@ import google_auth_oauthlib.flow
 import googleapiclient.discovery
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
+
 
 def get_user_credentials():
     creds = None
@@ -29,36 +31,77 @@ def get_user_credentials():
 def copy_shared_files(target_folder_id):
     creds = get_user_credentials()
     drive_service = googleapiclient.discovery.build("drive", "v3", credentials=creds)
-    page_token = None
+    executor = ThreadPoolExecutor(max_workers=5)
 
+    def replicate_folder(folder_id, destination_parent_id):
+        folder_data = drive_service.files().get(
+            fileId=folder_id,
+            fields="id, name"
+        ).execute()
+
+        new_folder = drive_service.files().create(
+            body={
+                'name': folder_data['name'],
+                'mimeType': 'application/vnd.google-apps.folder',
+                'parents': [destination_parent_id]
+            },
+            fields="id"
+        ).execute()
+        new_folder_id = new_folder['id']
+
+        page_token = None
+        while True:
+            resp = drive_service.files().list(
+                q=f"'{folder_id}' in parents and trashed=false",
+                fields="nextPageToken, files(id, name, mimeType)",
+                pageToken=page_token
+            ).execute()
+
+            tasks = []
+            for item in resp.get('files', []):
+                if item['mimeType'] == 'application/vnd.google-apps.folder':
+                    replicate_folder(item['id'], new_folder_id)
+                else:
+                    body = {
+                        'name': item['name'],
+                        'parents': [new_folder_id]
+                    }
+                    tasks.append(executor.submit(drive_service.files().copy, fileId=item['id'], body=body))
+
+            for _ in as_completed(tasks):
+                pass
+
+            page_token = resp.get('nextPageToken', None)
+            if not page_token:
+                break
+
+    page_token = None
     while True:
         response = drive_service.files().list(
             q="sharedWithMe = true",
-            fields="nextPageToken, files(id, name)",
+            fields="nextPageToken, files(id, name, mimeType)",
             pageToken=page_token
         ).execute()
 
+        tasks = []
         for file in response.get("files", []):
-            print(file['name'])
-            try:
+            if file["mimeType"] == "application/vnd.google-apps.folder":
+                replicate_folder(file['id'], target_folder_id)
+            else:
                 body = {
                     "name": file['name'],
-                    'parents': [target_folder_id]
+                    "parents": [target_folder_id]
                 }
-                copied_file = drive_service.files().copy(
-                    fileId=file["id"],
-                    body=body
-                ).execute()
-                print(f"Copied: {file['name']} -> {copied_file['id']}")
-            except Exception as e:
-                print(f"Error copying {file['name']}: {e}")
+                tasks.append(executor.submit(drive_service.files().copy, fileId=file["id"], body=body))
+
+        for _ in as_completed(tasks):
+            pass
 
         page_token = response.get("nextPageToken", None)
         if not page_token:
-            print('no more pages')
             break
-        else:
-            print('next page')
+
+    executor.shutdown(wait=True)
 
 
 if __name__ == "__main__":
