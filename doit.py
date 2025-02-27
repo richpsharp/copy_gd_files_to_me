@@ -1,11 +1,22 @@
-from __future__ import print_function
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import argparse
+import logging
 import os
 import pickle
+import sys
+
 import google.auth.transport.requests
 import google_auth_oauthlib.flow
 import googleapiclient.discovery
+
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format=(
+        '%(asctime)s (%(relativeCreated)d) %(levelname)s %(name)s'
+        ' [%(pathname)s.%(funcName)s:%(lineno)d] %(message)s'),
+    stream=sys.stdout)
+LOGGER = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
