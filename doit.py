@@ -34,10 +34,12 @@ def copy_shared_files(target_folder_id):
     executor = ThreadPoolExecutor(max_workers=5)
 
     def replicate_folder(folder_id, destination_parent_id):
+
         folder_data = drive_service.files().get(
             fileId=folder_id,
             fields="id, name"
         ).execute()
+        print(f'replicating folder {folder_data["name"]}')
 
         new_folder = drive_service.files().create(
             body={
@@ -66,6 +68,7 @@ def copy_shared_files(target_folder_id):
                         'name': item['name'],
                         'parents': [new_folder_id]
                     }
+                    print(f'submitting task to copy {item["name"]}')
                     tasks.append(executor.submit(drive_service.files().copy, fileId=item['id'], body=body))
 
             for _ in as_completed(tasks):
