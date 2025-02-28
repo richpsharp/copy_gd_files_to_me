@@ -174,17 +174,6 @@ def copy_shared_files(target_folder_name):
         LOGGER.info(f"Replicating folder: {folder_name}")
         new_folder_id = get_or_create_subfolder(destination_parent_id, folder_name)
 
-        # # Create the corresponding folder in the destination
-        # new_folder = drive_service.files().create(
-        #     body={
-        #         'name': folder_data['name'],
-        #         'mimeType': 'application/vnd.google-apps.folder',
-        #         'parents': [destination_parent_id]
-        #     },
-        #     fields="id"
-        # ).execute()
-        # new_folder_id = new_folder['id']
-
         page_token = None
         while True:
             resp = drive_service.files().list(
@@ -216,7 +205,7 @@ def copy_shared_files(target_folder_name):
                     result = future.result()
                     LOGGER.info(f"Copied '{name}' -> new file ID: {result['id']}")
                 except Exception as e:
-                    LOGGER.error(f"Error copying '{name}': {e}")
+                    LOGGER.exception(f"Error copying '{name}': {e}")
 
             page_token = resp.get('nextPageToken', None)
             if not page_token:
@@ -236,7 +225,7 @@ def copy_shared_files(target_folder_name):
                 try:
                     replicate_folder(f['id'], target_folder_id)
                 except Exception as e:
-                    LOGGER.error(f"Error copying folder '{f['name']}': {e}")
+                    LOGGER.exception(f"Error copying folder '{f['name']}': {e}")
             else:
                 if file_exists_in_folder(target_folder_id, f['name']):
                     LOGGER.info(
@@ -257,14 +246,13 @@ def copy_shared_files(target_folder_name):
                 result = future.result()
                 LOGGER.info(f"Copied '{name}' -> new file ID: {result['id']}")
             except Exception as e:
-                LOGGER.error(f"Error copying '{name}': {e}")
+                LOGGER.exception(f"Error copying '{name}': {e}")
 
         page_token = response.get("nextPageToken", None)
         if not page_token:
             break
 
     executor.shutdown(wait=True)
-
 
 
 if __name__ == "__main__":
