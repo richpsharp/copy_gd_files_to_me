@@ -52,7 +52,7 @@ LOGGER = logging.getLogger(__name__)
 def copy_shared_files(target_folder_name):
     creds = get_user_credentials()
     drive_service = googleapiclient.discovery.build("drive", "v3", credentials=creds)
-    executor = ThreadPoolExecutor(max_workers=5)
+    executor = ThreadPoolExecutor(max_workers=1)
 
     def get_or_create_folder_id(folder_name):
         query = (
@@ -78,6 +78,21 @@ def copy_shared_files(target_folder_name):
                 fields='id'
             ).execute()
             return new_folder['id']
+
+    def file_exists_in_folder(parent_id, file_name):
+        """
+        Check if a non-folder file with the given name already exists
+        under the specified parent folder.
+        """
+        query = (
+            f"'{parent_id}' in parents "
+            "and mimeType != 'application/vnd.google-apps.folder' "
+            "and trashed = false "
+            f"and name = '{file_name}'"
+        )
+        results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+        existing = results.get("files", [])
+        return len(existing) > 0
 
     def copy_file_with_backoff(file_id, body, max_retries=5, base_delay=1.0):
         attempt = 0
@@ -164,6 +179,11 @@ def copy_shared_files(target_folder_name):
                 if item['mimeType'] == 'application/vnd.google-apps.folder':
                     replicate_folder(item['id'], new_folder_id)
                 else:
+                    if file_exists_in_folder(new_folder_id, item['name']):
+                        LOGGER.info(
+                            f"File '{item['name']}' already exists in folder ID '{new_folder_id}', skipping."
+                        )
+                        continue
                     LOGGER.info(f"Submitting copy for file: {item['name']}")
                     body = {
                         'name': item['name'],
@@ -199,12 +219,17 @@ def copy_shared_files(target_folder_name):
                 except Exception as e:
                     LOGGER.error(f"Error copying folder '{f['name']}': {e}")
             else:
+                if file_exists_in_folder(target_folder_id, f['name']):
+                    LOGGER.info(
+                        f"File '{f['name']}' already exists in folder ID '{target_folder_id}', skipping."
+                    )
+                    continue
                 LOGGER.info(f"Submitting copy for shared file: {f['name']}")
                 body = {
                     "name": f['name'],
                     "parents": [target_folder_id]
                 }
-                future = executor.submit(copy_file, f["id"], body)
+                future = executor.submit(copy_file_with_backoff, f["id"], body)
                 main_tasks.append((f['name'], future))
 
         # Wait for the top-level copy tasks to finish
