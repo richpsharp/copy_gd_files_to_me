@@ -54,6 +54,29 @@ def copy_shared_files(target_folder_name):
     drive_service = googleapiclient.discovery.build("drive", "v3", credentials=creds)
     executor = ThreadPoolExecutor(max_workers=1)
 
+    def create_folder_with_backoff(folder_body, max_retries=20, base_delay=1.0):
+        """
+        Create a folder with exponential backoff on errors (e.g., SSL).
+        """
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return drive_service.files().create(
+                    body=folder_body,
+                    fields='id'
+                ).execute()
+            except Exception as e:
+                if attempt >= max_retries:
+                    raise
+                LOGGER.warning(
+                    f"Retrying folder creation '{folder_body.get('name')}' "
+                    f"(attempt {attempt}/{max_retries}) due to error: {e}. "
+                    f"Waiting {base_delay} seconds..."
+                )
+                time.sleep(base_delay)
+                base_delay *= 2
+
     def get_or_create_folder_id(folder_name):
         query = (
             f"name = '{folder_name}' "
@@ -70,13 +93,11 @@ def copy_shared_files(target_folder_name):
         if files_found:
             return files_found[0]['id']
         else:
-            new_folder = drive_service.files().create(
-                body={
-                    'name': folder_name,
-                    'mimeType': 'application/vnd.google-apps.folder'
-                },
-                fields='id'
-            ).execute()
+            folder_body = {
+                'name': folder_name,
+                'mimeType': 'application/vnd.google-apps.folder'
+            }
+            new_folder = create_folder_with_backoff(folder_body)
             return new_folder['id']
 
     def file_exists_in_folder(parent_id, file_name):
@@ -133,14 +154,12 @@ def copy_shared_files(target_folder_name):
             return existing_id
         else:
             LOGGER.info(f"Creating new folder '{folder_name}' under parent '{parent_id}'")
-            new_folder = drive_service.files().create(
-                body={
-                    'name': folder_name,
-                    'mimeType': 'application/vnd.google-apps.folder',
-                    'parents': [parent_id]
-                },
-                fields="id"
-            ).execute()
+            folder_body = {
+                'name': folder_name,
+                'mimeType': 'application/vnd.google-apps.folder',
+                'parents': [parent_id]
+            }
+            new_folder = create_folder_with_backoff(folder_body)
             return new_folder['id']
 
     target_folder_id = get_or_create_folder_id(target_folder_name)
