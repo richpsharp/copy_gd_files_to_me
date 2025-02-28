@@ -1,4 +1,3 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import argparse
 import logging
 import os
@@ -41,18 +40,12 @@ def get_user_credentials():
     return creds
 
 
-import logging
-import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import googleapiclient.discovery
-
 LOGGER = logging.getLogger(__name__)
 
 
 def copy_shared_files(target_folder_name):
     creds = get_user_credentials()
     drive_service = googleapiclient.discovery.build("drive", "v3", credentials=creds)
-    executor = ThreadPoolExecutor(max_workers=1)
 
     def create_folder_with_backoff(folder_body, max_retries=20, base_delay=1.0):
         """
@@ -182,7 +175,6 @@ def copy_shared_files(target_folder_name):
                 pageToken=page_token
             ).execute()
 
-            tasks = []
             for item in resp.get('files', []):
                 if item['mimeType'] == 'application/vnd.google-apps.folder':
                     replicate_folder(item['id'], new_folder_id)
@@ -197,15 +189,12 @@ def copy_shared_files(target_folder_name):
                         'name': item['name'],
                         'parents': [new_folder_id]
                     }
-                    future = executor.submit(copy_file_with_backoff, item['id'], body)
-                    tasks.append((item['name'], future))
-
-            for name, future in tasks:
-                try:
-                    result = future.result()
-                    LOGGER.info(f"Copied '{name}' -> new file ID: {result['id']}")
-                except Exception as e:
-                    LOGGER.exception(f"Error copying '{name}': {e}")
+                    try:
+                        result = copy_file_with_backoff(item['id'], body)
+                        LOGGER.info(f"Copied '{name}' -> new file ID: {result['id']}")
+                    except Exception as e:
+                        LOGGER.exception(f"Error copying '{name}': {e}")
+                        raise
 
             page_token = resp.get('nextPageToken', None)
             if not page_token:
@@ -219,40 +208,37 @@ def copy_shared_files(target_folder_name):
             pageToken=page_token
         ).execute()
 
-        main_tasks = []
         for f in response.get("files", []):
+            name = f['name']
             if f["mimeType"] == "application/vnd.google-apps.folder":
                 try:
                     replicate_folder(f['id'], target_folder_id)
                 except Exception as e:
-                    LOGGER.exception(f"Error copying folder '{f['name']}': {e}")
+                    LOGGER.exception(f"Error copying folder '{name}': {e}")
+                    raise
             else:
-                if file_exists_in_folder(target_folder_id, f['name']):
+                if file_exists_in_folder(target_folder_id, name):
                     LOGGER.info(
-                        f"File '{f['name']}' already exists in folder ID '{target_folder_id}', skipping."
+                        f"File '{name}' already exists in folder ID '{target_folder_id}', skipping."
                     )
                     continue
-                LOGGER.info(f"Submitting copy for shared file: {f['name']}")
+                LOGGER.info(f"Submitting copy for shared file: {name}")
                 body = {
-                    "name": f['name'],
+                    "name": name,
                     "parents": [target_folder_id]
                 }
-                future = executor.submit(copy_file_with_backoff, f["id"], body)
-                main_tasks.append((f['name'], future))
-
-        # Wait for the top-level copy tasks to finish
-        for name, future in main_tasks:
-            try:
-                result = future.result()
-                LOGGER.info(f"Copied '{name}' -> new file ID: {result['id']}")
-            except Exception as e:
-                LOGGER.exception(f"Error copying '{name}': {e}")
+                try:
+                    result = copy_file_with_backoff(f["id"], body)
+                    LOGGER.info(f"Copied '{name}' -> new file ID: {result['id']}")
+                except Exception as e:
+                    LOGGER.exception(f"Error copying '{name}': {e}")
+                    raise
 
         page_token = response.get("nextPageToken", None)
         if not page_token:
             break
 
-    executor.shutdown(wait=True)
+    LOGGER.info('waiting for executor to shutdown')
 
 
 if __name__ == "__main__":
