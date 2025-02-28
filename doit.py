@@ -4,6 +4,7 @@ import logging
 import os
 import pickle
 import sys
+import time
 
 import google.auth.transport.requests
 import google_auth_oauthlib.flow
@@ -47,6 +48,7 @@ import googleapiclient.discovery
 
 LOGGER = logging.getLogger(__name__)
 
+
 def copy_shared_files(target_folder_name):
     creds = get_user_credentials()
     drive_service = googleapiclient.discovery.build("drive", "v3", credentials=creds)
@@ -77,13 +79,54 @@ def copy_shared_files(target_folder_name):
             ).execute()
             return new_folder['id']
 
-    # Helper method so the submission to ThreadPoolExecutor runs the `.execute()` call
-    def copy_file(file_id, body):
-        return drive_service.files().copy(
-            fileId=file_id,
-            body=body,
-            fields="id, name, parents"
-        ).execute()
+    def copy_file_with_backoff(file_id, body, max_retries=5, base_delay=1.0):
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return drive_service.files().copy(
+                    fileId=file_id,
+                    body=body,
+                    fields="id, name, parents"
+                ).execute()
+            except Exception as e:
+                if attempt >= max_retries:
+                    raise
+                LOGGER.warning(
+                    f"Retrying copy for '{body.get('name')}' (attempt {attempt}/{max_retries}) "
+                    f"due to error: {e}. Waiting {base_delay} seconds..."
+                )
+                time.sleep(base_delay)
+                base_delay *= 2
+
+    def get_or_create_subfolder(parent_id, folder_name):
+        """
+        Check if a folder with `folder_name` exists under `parent_id`.
+        If it exists, return that folder's ID; otherwise create a new folder.
+        """
+        query = (
+            f"'{parent_id}' in parents "
+            "and mimeType = 'application/vnd.google-apps.folder' "
+            f"and name = '{folder_name}' "
+            "and trashed = false"
+        )
+        results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+        folders_found = results.get('files', [])
+        if folders_found:
+            existing_id = folders_found[0]['id']
+            LOGGER.info(f"Folder '{folder_name}' already exists under parent '{parent_id}' -> {existing_id}")
+            return existing_id
+        else:
+            LOGGER.info(f"Creating new folder '{folder_name}' under parent '{parent_id}'")
+            new_folder = drive_service.files().create(
+                body={
+                    'name': folder_name,
+                    'mimeType': 'application/vnd.google-apps.folder',
+                    'parents': [parent_id]
+                },
+                fields="id"
+            ).execute()
+            return new_folder['id']
 
     target_folder_id = get_or_create_folder_id(target_folder_name)
 
@@ -93,18 +136,20 @@ def copy_shared_files(target_folder_name):
             fields="id, name"
         ).execute()
 
-        LOGGER.info(f"Replicating folder: {folder_data['name']}")
+        folder_name = folder_data['name']
+        LOGGER.info(f"Replicating folder: {folder_name}")
+        new_folder_id = get_or_create_subfolder(destination_parent_id, folder_name)
 
-        # Create the corresponding folder in the destination
-        new_folder = drive_service.files().create(
-            body={
-                'name': folder_data['name'],
-                'mimeType': 'application/vnd.google-apps.folder',
-                'parents': [destination_parent_id]
-            },
-            fields="id"
-        ).execute()
-        new_folder_id = new_folder['id']
+        # # Create the corresponding folder in the destination
+        # new_folder = drive_service.files().create(
+        #     body={
+        #         'name': folder_data['name'],
+        #         'mimeType': 'application/vnd.google-apps.folder',
+        #         'parents': [destination_parent_id]
+        #     },
+        #     fields="id"
+        # ).execute()
+        # new_folder_id = new_folder['id']
 
         page_token = None
         while True:
@@ -117,7 +162,6 @@ def copy_shared_files(target_folder_name):
             tasks = []
             for item in resp.get('files', []):
                 if item['mimeType'] == 'application/vnd.google-apps.folder':
-                    # Recursively copy subfolder
                     replicate_folder(item['id'], new_folder_id)
                 else:
                     LOGGER.info(f"Submitting copy for file: {item['name']}")
@@ -125,17 +169,13 @@ def copy_shared_files(target_folder_name):
                         'name': item['name'],
                         'parents': [new_folder_id]
                     }
-                    # Submit the copy_file function to the executor
-                    future = executor.submit(copy_file, item['id'], body)
+                    future = executor.submit(copy_file_with_backoff, item['id'], body)
                     tasks.append((item['name'], future))
-                    break
 
-            # Collect results from all copy tasks
             for name, future in tasks:
                 try:
                     result = future.result()
                     LOGGER.info(f"Copied '{name}' -> new file ID: {result['id']}")
-                    sys.exit()
                 except Exception as e:
                     LOGGER.error(f"Error copying '{name}': {e}")
 
